@@ -1,0 +1,373 @@
+#!/bin/ksh
+#
+# Copyright (C) 2016 Bond Masuda
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <http://www.gnu.org/licenses/>.
+#
+
+##
+## settings
+##
+
+# URL resources
+IPECHO=http://ipecho.net/plain
+PIA_OPENVPN_CFGS=https://www.privateinternetaccess.com/openvpn/openvpn.zip
+PIA_CACERT=http://www.privateinternetaccess.com/openvpn/ca.rsa.4096.crt
+
+##
+## functions
+##
+
+#------------------------------------------------------------------------------
+# description: print message
+# inputs: none
+# outputs: IP address (string)
+# exit: 1 on failure
+#------------------------------------------------------------------------------
+function print_msg
+{
+    typeset _time=$(date +%F_%H:%M:%S\ %Z)
+    print "[${_time}] $@"
+    return 0
+}
+#------------------------------------------------------------------------------
+# description: get public IP address
+# inputs: none
+# outputs: IP address (string)
+# exit: 1 on failure
+#------------------------------------------------------------------------------
+function get_publicip
+{
+    curl -s ${IPECHO}
+    (( $? == 0 )) || return 1
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# description: get missing package
+# inputs: $1=package_name
+# outputs: none
+# exit: 0=good, >0=bad
+#------------------------------------------------------------------------------
+function getpkg
+{
+    typeset _pkg=$1
+    typeset _installcmd
+
+    case $distro in
+	CentOS)
+	    case $release in
+		7.*)
+		    _installcmd="yum -y install "
+		    ;;
+		*)
+		    print -u "unsupported OS: $distro $release"
+		    exit 1
+		    ;;
+	    esac
+	    ;;
+	Fedora)
+	    case $release in
+		23)
+		    _installcmd="dnf -y install "
+		    ;;
+		*)
+		    print -u2 "unsupported OS: $distro $release"
+		    exit 1
+		    ;;
+	    esac
+	    ;;
+	*)
+	    print -u2 "unsupported OS: $distro"
+	    exit 1
+	    ;;
+    esac
+    ${_installcmd} ${_pkg}
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# description: get password from user
+# inputs: $1=prompt
+# outputs: password on stdout
+# exit: 0=good, >0=bad
+#------------------------------------------------------------------------------
+function getpass
+{
+    typeset prompt=$1
+    typeset backspace=$(echo -e \\b\\c)
+    typeset enter=$(echo -e \\r\\c)
+    typeset savesetting=$(stty -g)
+    typeset keystroke password n i reading result
+    n=0
+    exec 4>/dev/tty
+    echo -e "${prompt}"\\c >&4
+    stty -echo -icrnl -icanon min 1 time 0
+    reading=1
+    while ((reading)) ; do
+	keystroke=$(dd bs=1 count=1 2>/dev/null)
+	case $keystroke in
+	    $enter)
+		reading=0
+		;;
+	    $backspace)
+		if ((n)) ; then
+		    echo -e "${backspace} ${backspace}"\\c >&4
+		    (( n-- ))
+		fi
+		;;
+	    *)
+		echo -e \*\\c >&4
+		data[n]=$keystroke
+		(( n++ ))
+	esac
+    done
+    stty "$savesetting"
+    echo >&4
+    result=""
+    i=0
+    while (( i < n )) ; do
+	result="${result}${data[i]}"
+	(( i++ ))
+    done
+    print $result
+    exec 4>&-
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# description: convert .ovpn to settings for NetworkManager-openvpn
+# inputs: $1=path to .ovpn file
+# outputs: none
+# exit: 0=good, >0=bad
+#------------------------------------------------------------------------------
+function ovpn2nm
+{
+    if [[ -z $1 ]] ; then
+	print_msg "ERROR: ovpn2nm missing argument. Aborting."
+	return 1
+    fi
+
+    if [[ "$1" != *.ovpn ]] ; then
+	print_msg "ERROR: ovpn2nm argument $1 does not end in .ovpn. Aborting"
+	return 1
+    fi
+
+    print_msg "Converting $1 to NetworkManager"
+    typeset _ovpn="$1"
+    typeset _uuid=$(uuidgen)
+    typeset _id
+    typeset _auth=$(awk '$1~/^auth$/ {print $2}' "${_ovpn}")
+    typeset _remote=$(awk '$1~/^remote$/ {print $2}' "${_ovpn}")
+    typeset _port=$(awk '$1~/^remote$/ {print $3}' "${_ovpn}")
+    typeset _cipher=$(awk '$1~/^cipher$/ {print $2}' "${_ovpn}")
+    typeset _username=$username
+
+    _id=$(basename "${_ovpn}")
+    _id="PIA ${_id%.ovpn}"
+
+    touch "/etc/NetworkManager/system-connections/${_id}"
+    chown root:root "/etc/NetworkManager/system-connections/${_id}"
+    chmod 600 "/etc/NetworkManager/system-connections/${_id}"
+    cat > "/etc/NetworkManager/system-connections/${_id}" <<EOF
+[connection]
+id=${_id}
+uuid=${_uuid}
+type=vpn
+autoconnect=false
+permissions=
+secondaries=
+timestamp=
+
+[vpn]
+connection-type=password
+auth=${_auth}
+password-flags=1
+remote=${_remote}
+cipher=${_cipher}
+comp-lzo=yes
+port=${_port}
+username=${_username}
+ca=/etc/openvpn/ca.rsa.4096.crt
+service-type=org.freedesktop.NetworkManager.openvpn
+
+[ipv4]
+dns-search=
+method=auto
+
+[ipv6]
+dns-search=
+ip6-privacy=0
+method=auto
+EOF
+    # return
+    return 0
+}
+
+##
+## main
+##
+
+# must be running as 'root' to setup
+if (( $(id -u) != 0 )) ; then
+    echo "must run as root" >&2
+    exit 1
+fi
+
+# support for CentOS 7, Fedora 23 only for now
+distro=$(lsb_release -i | awk -F: '{gsub(/[[:space:]]/,"",$2);print $2}')
+release=$(lsb_release -r | awk -F: '{gsub(/[[:space:]]/,"",$2);print $2}')
+supported=0
+[[ $distro == "CentOS" ]] && [[ $release == ^7 ]] && supported=1
+[[ $distro == "Fedora" ]] && [[ $release == 23 ]] && supported=1
+if (( supported != 1 )) ; then
+    echo "$distro $release is not supported" >&2
+    exit 1
+fi
+print_msg "Found OS: $distro $release"
+
+# make sure required packages are installed or install them
+[[ $distro == "CentOS" ]] && REQUIRED_PKG=( openvpn epel-release curl )
+[[ $distro == "Fedora" ]] && REQUIRED_PKG=( openvpn curl )
+#[[ $distro == "Fedora" ]] && REQUIRED_PKG=( openvpn curl bwm-ng )
+
+print_msg "Checking for required packages"
+for pkg in ${REQUIRED_PKG[*]}
+do
+    rpm -q $pkg 2>/dev/null 1>&2 || getpkg $pkg
+done
+
+# try to get current public IP
+print_msg "Detecting your current public IP address"
+public_ip=$(get_publicip)
+print_msg "Your current public IP = $public_ip"
+
+# make temp working dir 
+working=$(mktemp -d /var/tmp/setup_pia_vpn.XXXXX)
+
+# download PIA openvpn configs + cert
+print_msg "Downloading PIA OpenVPN configurations"
+curl --output ${working}/openvpn.zip -L --silent $PIA_OPENVPN_CFGS
+mkdir ${working}/pia
+cd ${working}/pia
+unzip -qq ${working}/openvpn.zip
+print_msg "Downloading PIA 4096-bit certificate"
+curl --output ${working}/pia/ca.rsa.4096.crt -L --silent $PIA_CACERT
+
+# create credential file
+# prompt user for username + password
+print_msg "Creating PIA credential file"
+unset username
+unset password
+print -n "Enter PIA username: "
+read username
+password=$(getpass "Enter PIA password: ")
+print $username  > ${working}/pia/PIA-cred.conf
+print $password >> ${working}/pia/PIA-cred.conf
+unset password
+
+# set perms and ownership
+print_msg "Securing file permissions and ownership"
+chown root:root ${working}/pia/*
+chmod 640 ${working}/pia/*.ovpn
+chmod 644 ${working}/pia/*.{pem,crt}
+chmod 400 ${working}/pia/PIA-cred.conf
+
+# populate an array with VPN name/config
+print_msg "Creating list of PIA VPN gateways"
+typeset -A VPN_LIST
+OIFS=$IFS
+IFS=$'\n'
+for file in $(ls -1 *.ovpn)
+do
+    vpn_cfg=$(basename $file)
+    vpn_name=${vpn_cfg%.ovpn}
+    vpn_name=${vpn_name//[[:space:]]/_}
+    VPN_LIST+=( [$vpn_name]=$vpn_cfg )
+done
+IFS=$OIFS
+
+## start modifying the configs
+##
+print_msg "Enhancing security of PIA OpenVPN gateway settings"
+# use port 1197 instead of 1198
+sed -i -e s/1198/1197/ ${working}/pia/*.ovpn
+# use AES-256-CBC instead of aes-128-cbc
+sed -i -e s/aes-128-cbc/AES-256-CBC/ ${working}/pia/*.ovpn
+# use SHA256 instead of sha1
+sed -i -e s/sha1/SHA256/ ${working}/pia/*.ovpn
+# change to use 4096 but RSA cert instead
+sed -i -e s/ca\.rsa\.2048\.crt/ca.rsa.4096.crt/ ${working}/pia/*.ovpn
+# modify to use credential file
+sed -i -e 's/auth-user-pass.*/auth-user-pass PIA-cred.conf/' ${working}/pia/*.ovpn
+# modify to append auth-nocache option
+sed -i -e '/auth-user-pass PIA-cred.conf/a auth-nocache' ${working}/pia/*.ovpn
+# put files in /etc/openvpn and set perms
+print_msg "Installing PIA OpenVPN settings in /etc/openvpn"
+mv ${working}/pia/* /etc/openvpn
+
+# fix SELinux labels
+print_msg "Fixing SELinux labels in /etc/openvpn"
+restorecon -r /etc/openvpn
+
+# prompt user for VPN choice
+print "Select your PIA VPN gateway: "
+PS3='PIA VPN gateway selection? '
+select vpn in ${!VPN_LIST[@]}
+do
+    if [[ -n $vpn ]] ; then
+	vpn_cfg=${VPN_LIST[$vpn]}
+	break
+    fi
+done
+
+# symlink user's choice to PIA.conf
+print_msg "Linking $vpn_cfg to PIA.conf"
+cd /etc/openvpn
+ln -s "$vpn_cfg" PIA.conf
+
+# enable service and start it up
+print_msg "Enabling and starting OpenVPN@PIA.service"
+systemctl enable openvpn@PIA.service
+systemctl start openvpn@PIA.service
+
+# check public IP using VPN; should be different
+print_msg "Re-checking your public IP"
+sleep 5
+new_public_ip=$(get_publicip)
+print_msg "Current Public IP = $new_public_ip, previous = $public_ip"
+
+print -n "Do you want to convert PIA VPN gateways to NetworkManager options? (y/n): "
+read answer
+if [[ $answer == @(y|yes|Y|Yes) ]] ; then
+    REQUIRED_PKG=( NetworkManager-openvpn NetworkManager-openvpn-gnome )
+    print_msg "Checking for additional required packages"
+    for pkg in ${REQUIRED_PKG[*]}
+    do
+	rpm -q $pkg 2>/dev/null 1>&2 || getpkg $pkg
+    done
+    print_msg "Converting PIA OpenVPN gateways to NetworkManager"
+    for vpn in ${!VPN_LIST[@]}
+    do
+	ovpn2nm "/etc/openvpn/${VPN_LIST[$vpn]}"
+    done
+    print_msg "Restarting NetworkManager"
+    systemctl restart NetworkManager.service
+else
+    print_msg "Skipping NetworkManager conversion."
+fi
+
+print_msg "PIA VPN gateway setup complete."
+rm -rf ${working}
+exit 0
