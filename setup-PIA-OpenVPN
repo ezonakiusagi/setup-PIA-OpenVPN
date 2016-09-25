@@ -229,7 +229,7 @@ fi
 distro=$(lsb_release -i | awk -F: '{gsub(/[[:space:]]/,"",$2);print $2}')
 release=$(lsb_release -r | awk -F: '{gsub(/[[:space:]]/,"",$2);print $2}')
 supported=0
-[[ $distro == "CentOS" ]] && [[ $release == ^7 ]] && supported=1
+[[ $distro == "CentOS" ]] && [[ $release == 7?(.)*([.0-9]) ]] && supported=1
 [[ $distro == "Fedora" ]] && [[ $release == 23 ]] && supported=1
 if (( supported != 1 )) ; then
     echo "$distro $release is not supported" >&2
