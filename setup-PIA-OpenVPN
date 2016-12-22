@@ -79,7 +79,7 @@ function getpkg
 	    ;;
 	Fedora)
 	    case $release in
-		23)
+		23|24|25)
 		    _installcmd="dnf -y install "
 		    ;;
 		*)
@@ -225,12 +225,12 @@ if (( $(id -u) != 0 )) ; then
     exit 1
 fi
 
-# support for CentOS 7, Fedora 23 only for now
+# support for CentOS 7, Fedora 23-25 only for now
 distro=$(lsb_release -i | awk -F: '{gsub(/[[:space:]]/,"",$2);print $2}')
 release=$(lsb_release -r | awk -F: '{gsub(/[[:space:]]/,"",$2);print $2}')
 supported=0
 [[ $distro == "CentOS" ]] && [[ $release == 7?(.)*([.0-9]) ]] && supported=1
-[[ $distro == "Fedora" ]] && [[ $release == 23 ]] && supported=1
+[[ $distro == "Fedora" ]] && [[ $release -ge 23 ]] && supported=1
 if (( supported != 1 )) ; then
     echo "$distro $release is not supported" >&2
     exit 1

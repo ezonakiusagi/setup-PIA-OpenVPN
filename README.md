@@ -9,7 +9,7 @@ you'll need the following for this script to work:
 
 # supported Linux distros (welcome help in this area)
 - CentOS 7
-- Fedora 23
+- Fedora 23-25
 
 # welcome contributors
 if anyone wants to help me make this script work on other Linux distros, please reach out.
