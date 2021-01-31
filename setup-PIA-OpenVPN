@@ -1,6 +1,6 @@
 #!/bin/ksh
 #
-# Copyright (C) 2016 Art of Server
+# Copyright (C) 2021 Art of Server
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -22,8 +22,7 @@
 
 # URL resources
 IPECHO=http://ipecho.net/plain
-PIA_OPENVPN_CFGS=https://www.privateinternetaccess.com/openvpn/openvpn.zip
-PIA_CACERT=http://www.privateinternetaccess.com/openvpn/ca.rsa.4096.crt
+PIA_OPENVPN_CFGS=https://www.privateinternetaccess.com/openvpn/openvpn-strong.zip
 
 ##
 ## functions
@@ -79,7 +78,7 @@ function getpkg
 	    ;;
 	Fedora)
 	    case $release in
-		23|24|25)
+		32|33)
 		    _installcmd="dnf -y install "
 		    ;;
 		*)
@@ -199,7 +198,7 @@ cipher=${_cipher}
 comp-lzo=yes
 port=${_port}
 username=${_username}
-ca=/etc/openvpn/ca.rsa.4096.crt
+ca=/etc/openvpn/client/ca.rsa.4096.crt
 service-type=org.freedesktop.NetworkManager.openvpn
 
 [ipv4]
@@ -230,7 +229,7 @@ distro=$(lsb_release -i | awk -F: '{gsub(/[[:space:]]/,"",$2);print $2}')
 release=$(lsb_release -r | awk -F: '{gsub(/[[:space:]]/,"",$2);print $2}')
 supported=0
 [[ $distro == "CentOS" ]] && [[ $release == 7?(.)*([.0-9]) ]] && supported=1
-[[ $distro == "Fedora" ]] && [[ $release -ge 23 ]] && supported=1
+[[ $distro == "Fedora" ]] && [[ $release -ge 32 ]] && supported=1
 if (( supported != 1 )) ; then
     echo "$distro $release is not supported" >&2
     exit 1
@@ -258,12 +257,10 @@ working=$(mktemp -d /var/tmp/setup_pia_vpn.XXXXX)
 
 # download PIA openvpn configs + cert
 print_msg "Downloading PIA OpenVPN configurations"
-curl --output ${working}/openvpn.zip -L --silent $PIA_OPENVPN_CFGS
+curl --output ${working}/openvpn-strong.zip -L --silent $PIA_OPENVPN_CFGS
 mkdir ${working}/pia
 cd ${working}/pia
-unzip -qq ${working}/openvpn.zip
-print_msg "Downloading PIA 4096-bit certificate"
-curl --output ${working}/pia/ca.rsa.4096.crt -L --silent $PIA_CACERT
+unzip -qq ${working}/openvpn-strong.zip
 
 # create credential file
 # prompt user for username + password
@@ -300,26 +297,18 @@ IFS=$OIFS
 
 ## start modifying the configs
 ##
-print_msg "Enhancing security of PIA OpenVPN gateway settings"
-# use port 1197 instead of 1198
-sed -i -e s/1198/1197/ ${working}/pia/*.ovpn
-# use AES-256-CBC instead of aes-128-cbc
-sed -i -e s/aes-128-cbc/AES-256-CBC/ ${working}/pia/*.ovpn
-# use SHA256 instead of sha1
-sed -i -e s/sha1/SHA256/ ${working}/pia/*.ovpn
-# change to use 4096 but RSA cert instead
-sed -i -e s/ca\.rsa\.2048\.crt/ca.rsa.4096.crt/ ${working}/pia/*.ovpn
+print_msg "Modifying PIA OpenVPN gateway settings"
 # modify to use credential file
 sed -i -e 's/auth-user-pass.*/auth-user-pass PIA-cred.conf/' ${working}/pia/*.ovpn
 # modify to append auth-nocache option
 sed -i -e '/auth-user-pass PIA-cred.conf/a auth-nocache' ${working}/pia/*.ovpn
-# put files in /etc/openvpn and set perms
-print_msg "Installing PIA OpenVPN settings in /etc/openvpn"
-mv ${working}/pia/* /etc/openvpn
+# put files in /etc/openvpn/client and set perms
+print_msg "Installing PIA OpenVPN profiles in /etc/openvpn/client"
+mv ${working}/pia/* /etc/openvpn/client
 
 # fix SELinux labels
-print_msg "Fixing SELinux labels in /etc/openvpn"
-restorecon -r /etc/openvpn
+print_msg "Fixing SELinux labels in /etc/openvpn/client"
+restorecon -r /etc/openvpn/client
 
 # prompt user for VPN choice
 print "Select your PIA VPN gateway: "
@@ -334,21 +323,22 @@ done
 
 # symlink user's choice to PIA.conf
 print_msg "Linking $vpn_cfg to PIA.conf"
-cd /etc/openvpn
-ln -s "$vpn_cfg" PIA.conf
+cd /etc/openvpn/client
+ln -sf "$vpn_cfg" PIA.conf
 
 # enable service and start it up
-print_msg "Enabling and starting OpenVPN@PIA.service"
-systemctl enable openvpn@PIA.service
-systemctl start openvpn@PIA.service
+print_msg "Starting openvpn-client@PIA.service"
+systemctl start openvpn-client@PIA.service
 
 # check public IP using VPN; should be different
 print_msg "Re-checking your public IP"
 sleep 5
 new_public_ip=$(get_publicip)
 print_msg "Current Public IP = $new_public_ip, previous = $public_ip"
+print_msg "Stopping openvpn-client@PIA.service"
+systemctl stop openvpn-client@PIA.service
 
-print -n "Do you want to convert PIA VPN gateways to NetworkManager options? (y/n): "
+print -n "Do you want to convert PIA VPN gateways to NetworkManager profile options? (y/n): "
 read answer
 if [[ $answer == @(y|yes|Y|Yes) ]] ; then
     REQUIRED_PKG=( NetworkManager-openvpn NetworkManager-openvpn-gnome )
@@ -357,10 +347,19 @@ if [[ $answer == @(y|yes|Y|Yes) ]] ; then
     do
 	rpm -q $pkg 2>/dev/null 1>&2 || getpkg $pkg
     done
+    print_msg "Removing all previous PIA VPN profiles in NetworkManager"
+    OIFS=$IFS
+    IFS=$'\n'
+    for file in $(find /etc/NetworkManager/system-connections -type f -name 'PIA\ *')
+    do
+	print_msg "=> deleting $file."
+	rm -f $file
+    done
+    IFS=$OIFS
     print_msg "Converting PIA OpenVPN gateways to NetworkManager"
     for vpn in ${!VPN_LIST[@]}
     do
-	ovpn2nm "/etc/openvpn/${VPN_LIST[$vpn]}"
+	ovpn2nm "/etc/openvpn/client/${VPN_LIST[$vpn]}"
     done
     print_msg "Restarting NetworkManager"
     systemctl restart NetworkManager.service
